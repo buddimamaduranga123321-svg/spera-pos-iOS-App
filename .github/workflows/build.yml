@@ -1,4 +1,4 @@
-name: Build Capacitor iOS IPA
+name: Build Spera POS iOS IPA
 
 on:
   push:
@@ -43,11 +43,41 @@ jobs:
                   print(f"Restored: {src} -> {dst}")
           '
 
-      - name: Install CocoaPods Dependencies
+      - name: Setup Capacitor Node Modules & CocoaPods
         run: |
           PODFILE=$(find . -name "Podfile" -maxdepth 4 | head -n 1)
           if [ -n "$PODFILE" ]; then
             POD_DIR=$(dirname "$PODFILE")
+            python3 -c '
+          import re, subprocess, os
+
+          podfile_path = "'"$PODFILE"'"
+          with open(podfile_path, "r", encoding="utf-8") as f:
+              content = f.read()
+
+          # Fix relative node_modules path when Podfile is inside ./App
+          content = content.replace("../../node_modules", "../node_modules")
+          with open(podfile_path, "w", encoding="utf-8") as f:
+              f.write(content)
+
+          # Detect required Capacitor/npm packages from Podfile
+          pkgs = set(re.findall(r"node_modules/(@[^/\x27\"]+/[^/\x27\"]+|[^/\x27\"]+)", content))
+          pkgs.add("@capacitor/ios")
+
+          # Match Capacitor major version to iOS deployment target
+          ver_suffix = ""
+          m = re.search(r"platform\s+:ios\s*,\s*[\x27\"](\d+)", content)
+          if m:
+              ios_ver = int(m.group(1))
+              if ios_ver <= 13:
+                  ver_suffix = "@6"
+              elif ios_ver == 14:
+                  ver_suffix = "@7"
+
+          install_list = [p + ver_suffix for p in sorted(pkgs)]
+          print("Installing npm packages:", install_list)
+          subprocess.run(["npm", "install", "--no-save", "--legacy-peer-deps"] + install_list, check=True)
+          '
             echo "Running pod install in $POD_DIR"
             cd "$POD_DIR"
             pod install
@@ -58,7 +88,7 @@ jobs:
           WS=$(find . -name "*.xcworkspace" -not -path "*.xcodeproj/*" -maxdepth 4 | head -n 1)
           PROJ=$(find . -name "*.xcodeproj" -maxdepth 4 | head -n 1)
           if [ -n "$WS" ]; then
-            SCHEME=$(xcodebuild -list -json -workspace "$WS" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['workspace']['schemes'][0])" 2>/dev/null || echo "App")
+            SCHEME=$(xcodebuild -list -json -workspace "$WS" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); schemes=[s for s in d['workspace']['schemes'] if not s.startswith('Pods-') and s != 'Pods']; print(schemes[0] if schemes else 'App')" 2>/dev/null || echo "App")
             echo "Building workspace $WS with scheme $SCHEME"
             xcodebuild -workspace "$WS" \
               -scheme "$SCHEME" \
@@ -92,10 +122,10 @@ jobs:
             exit 1
           fi
           cp -r "$APP_PATH" Payload/
-          zip -r New-iOS-App.ipa Payload
+          zip -r Spera-POS.ipa Payload
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: New-iOS-App
-          path: New-iOS-App.ipa
+          name: Spera-POS-iOS
+          path: Spera-POS.ipa
