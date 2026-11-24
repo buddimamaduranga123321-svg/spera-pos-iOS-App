@@ -1,0 +1,101 @@
+name: Build Capacitor iOS IPA
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Restore Folder Structure from FLATTEN-MANIFEST.csv
+        run: |
+          python3 -c '
+          import csv, os, shutil
+
+          if not os.path.exists("FLATTEN-MANIFEST.csv"):
+              raise FileNotFoundError("FLATTEN-MANIFEST.csv not found!")
+
+          with open("FLATTEN-MANIFEST.csv", mode="r", encoding="utf-8-sig") as f:
+              reader = csv.reader(f)
+              for row in reader:
+                  if len(row) < 2:
+                      continue
+                  c0, c1 = row[0].strip(), row[1].strip()
+                  if not c0 or not c1 or c0 == c1:
+                      continue
+                  if os.path.isfile(c0) and not os.path.exists(c1):
+                      src, dst = c0, c1
+                  elif os.path.isfile(c1) and not os.path.exists(c0):
+                      src, dst = c1, c0
+                  else:
+                      continue
+                  dst = dst.lstrip("./\\").replace("\\", "/")
+                  parent = os.path.dirname(dst)
+                  if parent:
+                      os.makedirs(parent, exist_ok=True)
+                  shutil.move(src, dst)
+                  print(f"Restored: {src} -> {dst}")
+          '
+
+      - name: Install CocoaPods Dependencies
+        run: |
+          PODFILE=$(find . -name "Podfile" -maxdepth 4 | head -n 1)
+          if [ -n "$PODFILE" ]; then
+            POD_DIR=$(dirname "$PODFILE")
+            echo "Running pod install in $POD_DIR"
+            cd "$POD_DIR"
+            pod install
+          fi
+
+      - name: Build Xcode Project
+        run: |
+          WS=$(find . -name "*.xcworkspace" -not -path "*.xcodeproj/*" -maxdepth 4 | head -n 1)
+          PROJ=$(find . -name "*.xcodeproj" -maxdepth 4 | head -n 1)
+          if [ -n "$WS" ]; then
+            SCHEME=$(xcodebuild -list -json -workspace "$WS" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['workspace']['schemes'][0])" 2>/dev/null || echo "App")
+            echo "Building workspace $WS with scheme $SCHEME"
+            xcodebuild -workspace "$WS" \
+              -scheme "$SCHEME" \
+              -configuration Release \
+              -sdk iphoneos \
+              SYMROOT="$PWD/build" \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY=""
+          elif [ -n "$PROJ" ]; then
+            echo "Building project $PROJ"
+            xcodebuild -project "$PROJ" \
+              -alltargets \
+              -configuration Release \
+              -sdk iphoneos \
+              SYMROOT="$PWD/build" \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY=""
+          else
+            echo "No .xcworkspace or .xcodeproj found!"
+            exit 1
+          fi
+
+      - name: Package into IPA
+        run: |
+          mkdir -p Payload
+          APP_PATH=$(find build -name "*.app" -type d | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "No .app bundle produced!"
+            exit 1
+          fi
+          cp -r "$APP_PATH" Payload/
+          zip -r New-iOS-App.ipa Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: New-iOS-App
+          path: New-iOS-App.ipa
